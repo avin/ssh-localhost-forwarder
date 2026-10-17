@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+config.json
+installation.json
+runtime/
+*.log
+*.zip

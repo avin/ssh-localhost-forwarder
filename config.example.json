@@ -1,0 +1,11 @@
+{
+  "ssh_host": "my-linux-host",
+  "poll_interval_seconds": 5,
+  "connect_timeout_seconds": 5,
+  "remote_python": "python3",
+  "ssh_path": "ssh",
+  "docker": true,
+  "listen_ipv6": true,
+  "include_ports": [],
+  "exclude_ports": []
+}

@@ -1,0 +1,174 @@
+# SSH Localhost Forwarder
+
+Автоматический доступ к TCP-портам Linux-машины через `localhost` Windows. Подходит для VMware, других виртуальных машин и удалённого Linux-сервера с SSH.
+
+Фоновый процесс обнаруживает порты сервисов и опубликованные Docker-порты, создаёт SSH-туннели на `127.0.0.1` и `::1`, удаляет их после закрытия сервисов и повторяет подключение после потери связи. Хост, интервалы и фильтры задаются в JSON. Python-зависимостей через pip нет.
+
+## Требования
+
+- Windows с Python 3.10+ и OpenSSH Client (`ssh` в PATH).
+- Linux-хост с SSH-сервером, Python 3.10+ и `ss` (iproute2).
+- Доступ по SSH-ключу без интерактивного ввода; стандартная проверка ключа сервера остаётся включённой.
+- Для поиска Docker-портов — Docker CLI и разрешение выполнять `docker ps` от имени SSH-пользователя. Если Docker недоступен, поиск обычных TCP-listeners продолжает работать с предупреждением.
+- Доступность TCP forwarding на SSH-сервере (`AllowTcpForwarding` и ограничения ключа должны разрешать нужные подключения).
+
+Пример `~/.ssh/config` на Windows (адрес и пользователь здесь условные):
+
+```sshconfig
+Host dev-linux
+    HostName 192.0.2.10
+    User developer
+    IdentityFile ~/.ssh/id_ed25519
+    IdentitiesOnly yes
+```
+
+Один раз подключитесь вручную, проверьте отпечаток ключа сервера. Затем проверьте неинтерактивный доступ:
+
+```powershell
+ssh dev-linux hostname
+ssh -o BatchMode=yes dev-linux hostname
+```
+
+## Установка
+
+Клонируйте репозиторий. Из его каталога выполните в PowerShell:
+
+```powershell
+.\Install.ps1 -SshHost dev-linux
+```
+
+Установщик определит текущий Python и соседний `pythonw.exe`, скопирует рабочие файлы в `%LOCALAPPDATA%\SshLocalhostForwarder`, создаст локальный `config.json`, проверит подключение к Linux, создаст ярлык автозагрузки и запустит процесс без окна. Права администратора не требуются. Существующий конфиг не перезаписывается.
+
+Дополнительные параметры:
+
+```powershell
+# Только выбранные порты
+.\Install.ps1 -SshHost developer@linux.example.com -IncludePorts 5432,8080,5173
+
+# Исключить системные службы, опрашивать каждые 3 секунды
+.\Install.ps1 -SshHost dev-linux -ExcludePorts 22,53 -PollIntervalSeconds 3
+
+# Без Docker, без автозагрузки и немедленного запуска
+.\Install.ps1 -SshHost dev-linux -NoDocker -NoAutostart -NoStart
+
+# Явный Python или каталог установки
+.\Install.ps1 -SshHost dev-linux -Python 'C:\Python312\python.exe' -InstallDir 'C:\Tools\SshLocalhostForwarder'
+```
+
+Если политика PowerShell запрещает запуск локальных скриптов, используйте разрешённый в вашей системе способ запуска или подписи. Установщик не меняет execution policy.
+
+## Как это работает
+
+```text
+Windows localhost:5432
+  → ssh.exe (локальный TCP listener)
+  → SSH-соединение с настроенным ssh_host
+  → 127.0.0.1:5432 внутри Linux
+  → сервис или опубликованный Docker-порт
+```
+
+`discovery.py` передаётся через stdin в `ssh <host> 'python3 -'`; файл не устанавливается в Linux. Он получает TCP-listeners через `ss -H -lnt` и Docker-публикации через `docker ps --format '{{.Ports}}'`. Диапазоны опубликованных TCP-портов тоже поддерживаются.
+
+`forwarder.py` создаёт отдельный процесс SSH для каждого порта и каждого включённого семейства адресов. Пример эквивалентного ручного туннеля:
+
+```powershell
+ssh -N -T -o ExitOnForwardFailure=yes -L 127.0.0.1:5432:127.0.0.1:5432 dev-linux
+```
+
+Опция `-L` означает `локальный_адрес:локальный_порт:адрес_в_Linux:порт_в_Linux`. Поэтому работают и сервисы, доступные только на loopback гостевой машины. Настройки NAT VMware и Windows portproxy не используются.
+
+## Конфигурация
+
+Редактируйте `%LOCALAPPDATA%\SshLocalhostForwarder\config.json`. Образец без персональных данных находится в `config.example.json`.
+
+| Поле | Назначение |
+|---|---|
+| `ssh_host` | Обязательный SSH-алиас или `user@host` |
+| `poll_interval_seconds` | Пауза между опросами, по умолчанию 5 секунд; фактический интервал включает время опроса |
+| `connect_timeout_seconds` | Тайм-аут соединения SSH, по умолчанию 5 секунд |
+| `remote_python` | Python на Linux-хосте, по умолчанию `python3` |
+| `ssh_path` | Имя или полный путь к локальному SSH-клиенту |
+| `docker` | Поиск опубликованных Docker-портов, по умолчанию `true` |
+| `listen_ipv6` | Дополнительные listeners на `::1`, по умолчанию `true` |
+| `include_ports` | Список разрешённых портов; пустой список означает все обнаруженные |
+| `exclude_ports` | Список исключённых портов; имеет приоритет над `include_ports` |
+
+После изменения конфига остановите и снова запустите процесс. Конфигурация загружается при старте. Смена IP хоста при сохранении SSH-алиаса выполняется через `~/.ssh/config`; новые SSH-подключения используют актуальные настройки.
+
+## Управление
+
+В PowerShell:
+
+```powershell
+$forwarderDir = Join-Path $env:LOCALAPPDATA 'SshLocalhostForwarder'
+& "$forwarderDir\Manage.ps1" -Action Status
+& "$forwarderDir\Manage.ps1" -Action Check
+& "$forwarderDir\Manage.ps1" -Action Stop
+& "$forwarderDir\Manage.ps1" -Action Start
+& "$forwarderDir\Manage.ps1" -Action DisableAutostart
+& "$forwarderDir\Manage.ps1" -Action EnableAutostart
+
+Get-Content "$forwarderDir\runtime\forward.log" -Tail 30
+Get-Content "$forwarderDir\runtime\ssh.log" -Tail 30
+Test-NetConnection 127.0.0.1 -Port 5432
+```
+
+`Status` показывает время обновления, обнаруженные конфликты, SSH-процессы, ошибки и предупреждения. Наличие процесса туннеля само по себе не гарантирует работоспособность удалённого приложения; проверяйте нужный сервис отдельно.
+
+Без установщика можно использовать CLI:
+
+```powershell
+python forwarder.py --config 'C:\path\config.json' check
+python forwarder.py --config 'C:\path\config.json' run
+python forwarder.py --config 'C:\path\config.json' status
+python forwarder.py --config 'C:\path\config.json' stop
+```
+
+Runtime-файлы создаются в подкаталоге `runtime` рядом с конфигом. Для отдельных экземпляров используйте разные каталоги конфигов и непересекающиеся порты. Установщик и `Manage.ps1` поддерживают один общий ярлык автозапуска Windows.
+
+## Автозапуск и перезагрузка
+
+Ярлык `SshLocalhostForwarder.lnk` лежит в пользовательской папке Startup (можно открыть её через `shell:startup`). Он запускает `pythonw.exe` с абсолютными путями скрипта и конфига при входе пользователя в Windows.
+
+VM и контейнеры должны быть запущены отдельно. Если Linux ещё недоступен, процесс повторяет попытки. При ошибке опроса управляемые туннели закрываются и создаются заново после восстановления связи. При аварийном завершении самого Python-процесса нужен повторный запуск; отдельной службы или watchdog нет. Настройка ярлыка проверяется установщиком, но перезагрузку следует проверить отдельно в своём окружении.
+
+## Docker и Compose
+
+Контейнер должен публиковать порт. Одного Dockerfile `EXPOSE` недостаточно:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    # Дополните environment и volumes настройками вашего проекта.
+```
+
+После запуска контейнера порт Linux `127.0.0.1:5432` станет доступен на Windows `localhost:5432`. Docker-контекст Windows может использовать тот же SSH-алиас, но автоматизация от выбранного контекста не зависит.
+
+## Ограничения
+
+- Только TCP; UDP не поддерживается.
+- На Windows создаются listeners только на loopback; внешние интерфейсы не публикуются.
+- Без фильтров обнаруживаются также системные TCP-службы Linux. Настройте `include_ports` или `exclude_ports` по необходимости.
+- Занятый локальный порт не перехватывается; конфликт проверяется повторно на следующих опросах. IPv4 и IPv6 проверяются независимо.
+- При одинаковом номере порта на нескольких IP Linux выбирается один адрес: приоритет у `127.0.0.1`, затем других IPv4 loopback, затем прочих IPv4, затем IPv6.
+- На каждый порт создаются до двух SSH-соединений. Для сотен портов такая схема может быть ресурсоёмкой.
+- Требуется сетевой доступ Windows к SSH-хосту. Программа не запускает VM и не обновляет её IP автоматически.
+
+## Проверки
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Тесты проверяют конфигурацию, фильтрацию, обнаружение портов и диапазонов Docker, IPv4/IPv6, занятость локального порта и деградацию при недоступности Docker. GitHub Actions запускает их на Windows/Linux и Python 3.10/3.12.
+
+Интеграционная проверка с реальным SSH-хостом описана в `tests/integration.py`. Она создаёт временный HTTP-сервер и контейнер, проверяет проброс и удаляет созданные ресурсы.
+
+## Резервное копирование и удаление
+
+Для переноса нужны этот репозиторий, установленный Python/OpenSSH и настроенный SSH-доступ. Персональные `config.json`, `installation.json`, SSH-ключи и журналы в Git не публикуются. Сохраните свой конфиг отдельно; после переустановки запустите `Install.ps1` с нужными параметрами. Пути к Python определятся заново.
+
+Для отключения выполните `Manage.ps1 -Action Stop`, затем `Manage.ps1 -Action DisableAutostart`. После этого рабочую папку можно удалить вручную. Существующие настройки SSH и VMware программа не меняет.
