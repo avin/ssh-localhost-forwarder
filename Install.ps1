@@ -30,7 +30,7 @@ if (Test-Path -LiteralPath $configPath) {
     throw 'Installation already has config.json. Stop the forwarder and edit that file, or select another InstallDir.'
 }
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-foreach ($name in @('forwarder.py', 'discovery.py', 'Manage.ps1', 'README.md')) {
+foreach ($name in @('forwarder.py', 'discovery.py', 'Manage.ps1', 'Autostart.ps1', 'README.md')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $InstallDir $name)
 }
 $config = [ordered]@{
@@ -51,15 +51,8 @@ $config | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $configPath -Encodi
 & $pythonExecutable (Join-Path $InstallDir 'forwarder.py') --config $configPath check
 if ($LASTEXITCODE -ne 0) { throw 'SSH discovery failed. Fix SSH/config.json, then run Manage.ps1 -Action Check.' }
 if (-not $NoAutostart) {
-    $shortcutPath = Join-Path ([Environment]::GetFolderPath('Startup')) 'SshLocalhostForwarder.lnk'
-    if (Test-Path -LiteralPath $shortcutPath) { throw 'Startup shortcut already exists; use Manage.ps1 -Action EnableAutostart after checking its target.' }
-    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
-    $shortcut.TargetPath = $pythonWindowless
-    $shortcut.Arguments = '"' + (Join-Path $InstallDir 'forwarder.py') + '" --config "' + $configPath + '" run'
-    $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.WindowStyle = 7
-    $shortcut.Description = 'Automatic localhost TCP forwarding over SSH'
-    $shortcut.Save()
+    . (Join-Path $InstallDir 'Autostart.ps1')
+    Enable-ForwarderAutostart -InstallDir $InstallDir -PythonWindowless $pythonWindowless
 }
 if (-not $NoStart) { & (Join-Path $InstallDir 'Manage.ps1') -Action Start }
 Write-Output "Installed in $InstallDir"

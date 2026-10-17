@@ -16,7 +16,7 @@ jobs:
       - name: Check PowerShell syntax
         shell: pwsh
         run: |
-          foreach ($file in Get-ChildItem -Filter *.ps1) {
+          foreach ($file in Get-ChildItem -Recurse -Filter *.ps1) {
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
             if ($parseErrors.Count) { throw ($parseErrors | Out-String) }

@@ -143,9 +143,57 @@ def write_state(runtime, state):
     temporary.replace(runtime / "status.json")
 
 
+def protect_process_tree():
+    """Keep a noninherited job handle open until exit; Windows owns cleanup."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("process_time", ctypes.c_longlong), ("job_time", ctypes.c_longlong),
+                    ("flags", wintypes.DWORD), ("min_working_set", ctypes.c_size_t),
+                    ("max_working_set", ctypes.c_size_t), ("active_processes", wintypes.DWORD),
+                    ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD),
+                    ("scheduling_class", wintypes.DWORD)]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("basic", BasicLimits), ("io_counters", ctypes.c_ulonglong * 6),
+                    ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                    ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.SetInformationJobObject.restype = wintypes.BOOL
+    kernel.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    limits = ExtendedLimits()
+    limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+        error = ctypes.get_last_error()
+        kernel.CloseHandle(job)
+        raise ctypes.WinError(error)
+    if not kernel.AssignProcessToJobObject(job, kernel.GetCurrentProcess()):
+        error = ctypes.get_last_error()
+        kernel.CloseHandle(job)
+        raise ctypes.WinError(error)
+    # Closing this handle ourselves would also terminate the current process.
+    # The OS closes it on normal exit, a crash, or TerminateProcess instead.
+    return job
+
+
 def run(config_path, config):
     runtime = config_path.parent / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
+    if (runtime / "paused").exists():
+        return
     lock = acquire_lock(runtime / "instance.lock")
     if lock is None:
         print("Already running for this configuration")
@@ -162,6 +210,7 @@ def run(config_path, config):
     stop_file.unlink(missing_ok=True)
     logging.info("Started; SSH host=%s", config["ssh_host"])
     try:
+        process_job = protect_process_tree()
         command = ssh_command(config)
         while not stop_file.exists():
             error = None
